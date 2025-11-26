@@ -225,14 +225,20 @@ class FeedAnalyzer:
             print(f"⚠️  No XML files found in {self.feeds_directory}")
             return all_jobs
         
-        print(f"📁 Analyzing {len(xml_files)} XML file(s)...\n")
+        total_files = len(xml_files)
+        print(f"📁 Analyzing {total_files} XML file(s)...\n")
         
-        for xml_file in xml_files:
+        for index, xml_file in enumerate(xml_files, 1):
             jobs = self._parse_xml_file(xml_file)
             all_jobs.extend(jobs)
-            print(f"   ✓ {xml_file.name}: {len(jobs)} job(s) found")
+            
+            # Calculate progress
+            percentage = (index / total_files) * 100
+            remaining = total_files - index
+            
+            print(f"   [{percentage:5.1f}%] ✓ {xml_file.name}: {len(jobs)} job(s) found | {remaining} file(s) remaining")
         
-        print(f"\n📊 Total: {len(all_jobs)} job(s) in {len(xml_files)} file(s)\n")
+        print(f"\n📊 Total: {len(all_jobs)} job(s) in {total_files} file(s)\n")
         return all_jobs
     
     def search_jobs_by_team(self, team_identifier: str) -> List[JobInfo]:
