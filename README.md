@@ -1,0 +1,135 @@
+# XML Feed Analyzer
+
+Herramienta para analizar feeds XML y buscar información sobre jobs y teams.
+
+## 📋 Características
+
+- ✅ Analiza todos los archivos XML en la carpeta `XMLFEEDS` en bulk
+- ✅ Busca todos los jobs de un team específico (y los cuenta)
+- ✅ Busca un job específico de un team específico
+- ✅ Maneja diferentes identificadores para teams (company ID, company name, team identifier)
+- ✅ Maneja diferentes identificadores para jobs (job ID, reference ID, job name)
+- ✅ Búsqueda flexible (case-insensitive y por coincidencia parcial)
+- ✅ Resumen de jobs agrupados por team
+
+## 🚀 Uso
+
+### 1. Buscar todos los jobs de un team
+
+```bash
+python feed_analyzer.py team "nombre_del_team"
+```
+
+**Ejemplo:**
+```bash
+python feed_analyzer.py team "Acme Corp"
+```
+
+Esto buscará en todos los XMLs y mostrará todos los jobs que pertenezcan a ese team, ya sea por company name, company ID, o cualquier otro identificador.
+
+### 2. Buscar un job específico de un team específico
+
+```bash
+python feed_analyzer.py job "nombre_del_team" "nombre_o_id_del_job"
+```
+
+**Ejemplo:**
+```bash
+python feed_analyzer.py job "Acme Corp" "Senior Developer"
+```
+
+Esto buscará jobs que coincidan tanto con el team como con el job especificado.
+
+### 3. Ver resumen por teams
+
+```bash
+python feed_analyzer.py summary
+```
+
+Muestra un resumen con la cantidad de jobs por cada team.
+
+### 4. Listar todos los jobs
+
+```bash
+python feed_analyzer.py all
+```
+
+Muestra todos los jobs encontrados en todos los XMLs.
+
+## 📁 Estructura
+
+```
+FEED SEARCH/
+├── XMLFEEDS/           # Coloca aquí tus archivos XML
+│   ├── feed1.xml
+│   ├── feed2.xml
+│   └── ...
+├── feed_analyzer.py    # Script principal
+└── README.md          # Este archivo
+```
+
+## 🔍 Campos que busca
+
+La herramienta es flexible y busca información en múltiples campos posibles:
+
+### Para Teams/Companies:
+- `companyId`, `company-id`, `clientId`, `teamId`
+- `company`, `companyName`, `client`, `clientName`, `teamName`
+- `team`, `department`, `division`, `businessUnit`
+
+### Para Jobs:
+- `jobId`, `job-id`, `id`, `requisitionId`
+- `referenceId`, `reference-id`, `refNumber`, `requisitionNumber`
+- `title`, `jobTitle`, `jobName`, `position`, `positionTitle`
+
+## 💡 Uso en Python
+
+También puedes usar la clase `FeedAnalyzer` directamente en tu código:
+
+```python
+from feed_analyzer import FeedAnalyzer, print_jobs_table
+
+# Crear el analyzer
+analyzer = FeedAnalyzer("XMLFEEDS")
+
+# Buscar todos los jobs de un team
+jobs = analyzer.search_jobs_by_team("Acme Corp")
+print(f"Encontrados: {len(jobs)} jobs")
+print_jobs_table(jobs)
+
+# Buscar un job específico
+jobs = analyzer.search_specific_job("Acme Corp", "Senior Developer")
+print_jobs_table(jobs)
+
+# Obtener resumen
+summary = analyzer.get_summary_by_team()
+for team, count in summary.items():
+    print(f"{team}: {count} jobs")
+```
+
+## 📊 Formato de salida
+
+La herramienta muestra información detallada de cada job encontrado:
+
+```
+🔹 Job #1
+   Archivo:      feed1.xml
+   Job ID:       12345
+   Reference ID: REF-2025-001
+   Job Name:     Senior Software Developer
+   Company Name: Acme Corp
+   Company ID:   ACME123
+   Team:         Engineering
+```
+
+## ⚙️ Requisitos
+
+- Python 3.6 o superior
+- Librería estándar de Python (no requiere instalaciones adicionales)
+
+## 🎯 Notas
+
+- La búsqueda es **case-insensitive** (no distingue mayúsculas/minúsculas)
+- Se hace búsqueda por **coincidencia parcial** (si buscas "Acme" encontrará "Acme Corp")
+- Maneja diferentes formatos de XML y namespaces automáticamente
+- Si un XML no tiene un tag específico de job, intentará usar el elemento raíz
