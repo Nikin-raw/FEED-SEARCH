@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
 """
 XML Feed Analyzer
-Analiza feeds XML para buscar información sobre jobs y teams
+Analyzes XML feeds to search for information about jobs and teams
 """
 
-import os
-import xml.etree.ElementTree as ET
+import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional, Set
 from dataclasses import dataclass
 from collections import defaultdict
+import xml.etree.ElementTree as ET
+
+# Tag mappings for field extraction (improves performance by avoiding repeated string definitions)
+FIELD_TAGS = {
+    'job_id': ('jobId', 'job-id', 'id', 'JobID', 'ID', 'requisitionId'),
+    'reference_id': ('referenceId', 'reference-id', 'refId', 'ref-id', 'ReferenceID', 'refNumber', 'requisitionNumber'),
+    'partner_job_id': ('partnerJobId', 'partner-job-id', 'PartnerJobId', 'partnerjobid'),
+    'job_name': ('title', 'jobTitle', 'job-title', 'name', 'jobName', 'position', 'positionTitle', 'Title'),
+    'company_id': ('companyId', 'company-id', 'clientId', 'client-id', 'CompanyID', 'teamId', 'team-id'),
+    'company_name': ('company', 'companyName', 'company-name', 'client', 'clientName', 'Company', 'employer', 'organization', 'teamName'),
+    'team_identifier': ('team', 'department', 'division', 'businessUnit', 'Team', 'Department'),
+}
+
+JOB_ELEMENT_TAGS = ('job', 'Job', 'position', 'Position', 'vacancy', 'Vacancy', 'requisition', 'Requisition', 'posting')
+
+# Output width for table formatting
+TABLE_WIDTH = 100
 
 
 @dataclass
 class JobInfo:
-    """Información de un job encontrado"""
+    """Information about a found job"""
     file: str
     job_id: Optional[str] = None
     reference_id: Optional[str] = None
@@ -23,57 +39,33 @@ class JobInfo:
     company_name: Optional[str] = None
     team_identifier: Optional[str] = None
     partner_job_id: Optional[str] = None
-    xml_element: Any = None
+    xml_element: Optional[ET.Element] = None
     
     def matches_team(self, team_search: str) -> bool:
-        """Checks if the job belongs to the searched team"""
+        """Checks if the job belongs to the searched team (case-insensitive)"""
         team_search_lower = team_search.lower()
         
-        # Search in all team/company related fields
-        fields_to_check = [
-            self.company_id,
-            self.company_name,
-            self.team_identifier
-        ]
-        
-        for field in fields_to_check:
-            if field and team_search_lower in field.lower():
-                return True
-        return False
+        # Check all team/company related fields
+        team_fields = (self.company_id, self.company_name, self.team_identifier)
+        return any(field and team_search_lower in field.lower() for field in team_fields)
     
     def matches_job(self, job_search: str) -> bool:
-        """Checks if it's the searched job"""
+        """Checks if it's the searched job (case-insensitive)"""
         job_search_lower = job_search.lower()
         
-        # Search in all job related fields
-        fields_to_check = [
-            self.job_id,
-            self.reference_id,
-            self.job_name
-        ]
+        # Check standard job fields
+        job_fields = (self.job_id, self.reference_id, self.job_name)
+        if any(field and job_search_lower in field.lower() for field in job_fields):
+            return True
         
-        for field in fields_to_check:
-            if field and job_search_lower in field.lower():
-                return True
-        
-        # Check partner_job_id - search as substring
-        # Example: searching "1199359" should find "170001199359"
+        # Check partner_job_id with special matching logic
         if self.partner_job_id:
-            # Remove spaces and compare
             partner_clean = self.partner_job_id.replace(' ', '').lower()
             search_clean = job_search.replace(' ', '').lower()
             
-            # Exact match
-            if search_clean == partner_clean:
-                return True
-            
-            # Partial match (job_search is contained in partner_job_id)
-            if search_clean in partner_clean:
-                return True
-            
-            # Suffix match (partner_job_id ends with job_search)
-            if partner_clean.endswith(search_clean):
-                return True
+            return (search_clean == partner_clean or 
+                    search_clean in partner_clean or 
+                    partner_clean.endswith(search_clean))
         
         return False
     
@@ -92,92 +84,49 @@ class JobInfo:
 
 
 class FeedAnalyzer:
-    """XML Feed Analyzer"""
+    """XML Feed Analyzer - Extracts job information from XML feeds"""
     
     def __init__(self, feeds_directory: str = "XMLFEEDS"):
         self.feeds_directory = Path(feeds_directory)
         if not self.feeds_directory.exists():
             self.feeds_directory.mkdir(parents=True, exist_ok=True)
+        self._all_jobs_cache: Optional[List[JobInfo]] = None
     
     def _extract_text(self, element: ET.Element, *tags: str) -> Optional[str]:
         """Extracts text from an XML element searching through multiple possible tags"""
         for tag in tags:
-            # Search with different variants (case insensitive)
-            found = element.find(f".//{tag}")
-            if found is not None and found.text:
-                return found.text.strip()
-            
-            # Search without namespace
-            found = element.find(f".//{{*}}{tag}")
-            if found is not None and found.text:
-                return found.text.strip()
+            # Search with and without namespace
+            for path in (f".//{tag}", f".//{{*}}{tag}"):
+                found = element.find(path)
+                if found is not None and found.text:
+                    return found.text.strip()
         return None
     
     def _extract_partner_job_id(self, element: ET.Element) -> Optional[str]:
         """Extracts the partnerJobId which may contain CDATA"""
-        tags = ['partnerJobId', 'partner-job-id', 'PartnerJobId', 'partnerjobid']
-        for tag in tags:
-            # Search with different variants
-            found = element.find(f".//{tag}")
-            if found is not None:
-                # Text can be in CDATA or directly
-                text = found.text if found.text else ''
-                text = text.strip()
-                if text:
-                    return text
-            
-            # Search without namespace
-            found = element.find(f".//{{*}}{tag}")
-            if found is not None:
-                text = found.text if found.text else ''
-                text = text.strip()
-                if text:
-                    return text
+        for tag in FIELD_TAGS['partner_job_id']:
+            for path in (f".//{tag}", f".//{{*}}{tag}"):
+                found = element.find(path)
+                if found is not None and found.text:
+                    text = found.text.strip()
+                    if text:
+                        return text
         return None
     
     def _parse_job_from_element(self, element: ET.Element, filename: str) -> JobInfo:
         """Extracts job information from an XML element"""
         job = JobInfo(file=filename)
         
-        # Try to extract Job ID (multiple possible variants)
-        job.job_id = self._extract_text(
-            element, 'jobId', 'job-id', 'id', 'JobID', 'ID', 'requisitionId'
-        )
-        
-        # Try to extract Reference ID
-        job.reference_id = self._extract_text(
-            element, 'referenceId', 'reference-id', 'refId', 'ref-id', 
-            'ReferenceID', 'refNumber', 'requisitionNumber'
-        )
-        
-        # Try to extract Partner Job ID (may contain CDATA)
+        # Extract all fields using tag mappings
+        job.job_id = self._extract_text(element, *FIELD_TAGS['job_id'])
+        job.reference_id = self._extract_text(element, *FIELD_TAGS['reference_id'])
         job.partner_job_id = self._extract_partner_job_id(element)
-        
-        # Try to extract Job Name/Title
-        job.job_name = self._extract_text(
-            element, 'title', 'jobTitle', 'job-title', 'name', 'jobName',
-            'position', 'positionTitle', 'Title'
-        )
-        
-        # Try to extract Company ID
-        job.company_id = self._extract_text(
-            element, 'companyId', 'company-id', 'clientId', 'client-id',
-            'CompanyID', 'teamId', 'team-id'
-        )
-        
-        # Try to extract Company Name
-        job.company_name = self._extract_text(
-            element, 'company', 'companyName', 'company-name', 'client',
-            'clientName', 'Company', 'employer', 'organization', 'teamName'
-        )
-        
-        # Team identifier (can be a specific field)
-        job.team_identifier = self._extract_text(
-            element, 'team', 'department', 'division', 'businessUnit',
-            'Team', 'Department'
-        )
-        
+        job.job_name = self._extract_text(element, *FIELD_TAGS['job_name'])
+        job.company_id = self._extract_text(element, *FIELD_TAGS['company_id'])
+        job.company_name = self._extract_text(element, *FIELD_TAGS['company_name'])
+        job.team_identifier = self._extract_text(element, *FIELD_TAGS['team_identifier'])
         job.xml_element = element
+        
         return job
     
     def _parse_xml_file(self, filepath: Path) -> List[JobInfo]:
@@ -188,24 +137,21 @@ class FeedAnalyzer:
             tree = ET.parse(filepath)
             root = tree.getroot()
             
-            # Try to find job elements with different common names
-            job_tags = ['job', 'Job', 'position', 'Position', 'vacancy', 
-                       'Vacancy', 'requisition', 'Requisition', 'posting']
-            
-            for tag in job_tags:
-                # Search with and without namespace
-                elements = root.findall(f".//{tag}")
-                elements.extend(root.findall(f".//{{*}}{tag}"))
-                
-                for element in elements:
-                    job = self._parse_job_from_element(element, filepath.name)
-                    jobs.append(job)
+            # Collect all job elements from different tag names
+            found_jobs = set()
+            for tag in JOB_ELEMENT_TAGS:
+                for path in (f".//{tag}", f".//{{*}}{tag}"):
+                    for element in root.findall(path):
+                        # Use element's memory address to avoid duplicates
+                        elem_id = id(element)
+                        if elem_id not in found_jobs:
+                            found_jobs.add(elem_id)
+                            job = self._parse_job_from_element(element, filepath.name)
+                            jobs.append(job)
             
             # If no jobs found with common tags, try with root element
-            # (in case each XML is a single job)
             if not jobs and root.tag:
                 job = self._parse_job_from_element(root, filepath.name)
-                # Only add if found at least one field
                 if any([job.job_id, job.reference_id, job.job_name]):
                     jobs.append(job)
         
@@ -218,8 +164,12 @@ class FeedAnalyzer:
     
     def analyze_all_feeds(self) -> List[JobInfo]:
         """Analyzes all XML files in the folder"""
+        # Return cached results if available
+        if self._all_jobs_cache is not None:
+            return self._all_jobs_cache
+        
         all_jobs = []
-        xml_files = list(self.feeds_directory.glob("*.xml"))
+        xml_files = sorted(self.feeds_directory.glob("*.xml"))  # Sort for consistent output
         
         if not xml_files:
             print(f"⚠️  No XML files found in {self.feeds_directory}")
@@ -239,6 +189,9 @@ class FeedAnalyzer:
             print(f"   [{percentage:5.1f}%] ✓ {xml_file.name}: {len(jobs)} job(s) found | {remaining} file(s) remaining")
         
         print(f"\n📊 Total: {len(all_jobs)} job(s) in {total_files} file(s)\n")
+        
+        # Cache results
+        self._all_jobs_cache = all_jobs
         return all_jobs
     
     def search_jobs_by_team(self, team_identifier: str) -> List[JobInfo]:
@@ -280,13 +233,13 @@ class FeedAnalyzer:
         return dict(summary)
 
 
-def print_jobs_table(jobs: List[JobInfo]):
-    """Prints jobs in table format"""
+def print_jobs_table(jobs: List[JobInfo]) -> None:
+    """Prints jobs in a formatted table"""
     if not jobs:
         print("No jobs found.")
         return
     
-    print("=" * 100)
+    print("=" * TABLE_WIDTH)
     for i, job in enumerate(jobs, 1):
         print(f"\n🔹 Job #{i}")
         print(f"   File:           {job.file}")
@@ -298,42 +251,41 @@ def print_jobs_table(jobs: List[JobInfo]):
         print(f"   Company ID:     {job.company_id or 'N/A'}")
         if job.team_identifier:
             print(f"   Team:           {job.team_identifier}")
-    print("\n" + "=" * 100)
+    print("\n" + "=" * TABLE_WIDTH)
 
 
-def main():
-    """Main function for demonstration"""
-    import sys
-    
-    analyzer = FeedAnalyzer("XMLFEEDS")
-    
+def print_usage() -> None:
+    """Prints usage information"""
+    print("📋 XML Feed Analyzer - Usage:")
+    print("\n  Option 1: Search all jobs from a team")
+    print("    python feed_analyzer.py team <team_identifier>")
+    print("\n  Option 2: Search a specific job from a team")
+    print("    python feed_analyzer.py job <team_identifier> <job_identifier>")
+    print("\n  Option 3: View summary by teams")
+    print("    python feed_analyzer.py summary")
+    print("\n  Option 4: List all jobs")
+    print("    python feed_analyzer.py all")
+    print("\nExamples:")
+    print("  python feed_analyzer.py team 'Acme Corp'")
+    print("  python feed_analyzer.py job 'Acme Corp' 'Senior Developer'")
+    print("  python feed_analyzer.py summary")
+
+
+def main() -> None:
+    """Main function for command-line interface"""
     if len(sys.argv) < 2:
-        print("📋 XML Feed Analyzer - Usage:")
-        print("\n  Option 1: Search all jobs from a team")
-        print("    python feed_analyzer.py team <team_identifier>")
-        print("\n  Option 2: Search a specific job from a team")
-        print("    python feed_analyzer.py job <team_identifier> <job_identifier>")
-        print("\n  Option 3: View summary by teams")
-        print("    python feed_analyzer.py summary")
-        print("\n  Option 4: List all jobs")
-        print("    python feed_analyzer.py all")
-        print("\nExamples:")
-        print("  python feed_analyzer.py team 'Acme Corp'")
-        print("  python feed_analyzer.py job 'Acme Corp' 'Senior Developer'")
-        print("  python feed_analyzer.py summary")
+        print_usage()
         return
     
+    analyzer = FeedAnalyzer("XMLFEEDS")
     command = sys.argv[1].lower()
     
     if command == "team" and len(sys.argv) >= 3:
-        team_id = sys.argv[2]
-        jobs = analyzer.search_jobs_by_team(team_id)
+        jobs = analyzer.search_jobs_by_team(sys.argv[2])
         print_jobs_table(jobs)
     
     elif command == "job" and len(sys.argv) >= 4:
-        team_id = sys.argv[2]
-        job_id = sys.argv[3]
-        jobs = analyzer.search_specific_job(team_id, job_id)
+        jobs = analyzer.search_specific_job(sys.argv[2], sys.argv[3])
         print_jobs_table(jobs)
     
     elif command == "summary":
